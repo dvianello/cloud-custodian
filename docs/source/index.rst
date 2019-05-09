@@ -24,6 +24,7 @@ Navigate below and get started with Cloud Custodian!
    quickstart/advanced
    quickstart/policyStructure
    overview/glossary
+   overview/deployment
 
 .. toctree::
    :maxdepth: 2
