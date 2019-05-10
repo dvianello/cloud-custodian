@@ -197,7 +197,7 @@ def init(config, use, debug, verbose, accounts, tags, policies, resource=None, p
     return accounts_config, custodian_config, executor
 
 
-def resolve_regions(regions, partition='aws'):
+def resolve_regions(regions):
     if 'all' in regions:
         client = boto3.client('ec2')
         return [region['RegionName'] for region in client.describe_regions()['Regions']]
