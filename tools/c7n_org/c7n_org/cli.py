@@ -199,7 +199,8 @@ def init(config, use, debug, verbose, accounts, tags, policies, resource=None, p
 
 def resolve_regions(regions, partition='aws'):
     if 'all' in regions:
-        return boto3.Session().get_available_regions('ec2', partition)
+        client = boto3.client('ec2')
+        return [region['RegionName'] for region in client.describe_regions()['Regions']]
     if not regions:
         return ('us-east-1', 'us-west-2')
     return regions
