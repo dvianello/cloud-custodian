@@ -90,10 +90,15 @@ class SlackDelivery(object):
                     resource_list,
                     self.logger, 'slack_template', 'slack_default',
                     self.config['templates_folders'])
-            elif target.startswith('slack://tag/') and 'tags' in resource:
+            elif target.startswith('slack://tag/') and 'Tags' in resource:
                 tag_name = target.split('tag/', 1)[1]
-                result = resource.get('tags', {}).get(tag_name, None)
-                resolved_addrs = result
+                result = next((item for item in resource.get('Tags', []) if item["Key"] == tag_name), None)
+                if not result:
+                    self.logger.debug(
+                        "No %s tag found in resource." % tag_name)
+                    continue
+
+                resolved_addrs = result['Value']
                 slack_messages[resolved_addrs] = get_rendered_jinja(
                     resolved_addrs, sqs_message,
                     resource_list,
