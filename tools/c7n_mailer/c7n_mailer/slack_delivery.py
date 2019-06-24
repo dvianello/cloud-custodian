@@ -92,7 +92,8 @@ class SlackDelivery(object):
                     self.config['templates_folders'])
             elif target.startswith('slack://tag/') and 'Tags' in resource:
                 tag_name = target.split('tag/', 1)[1]
-                result = next((item for item in resource.get('Tags', []) if item["Key"] == tag_name), None)
+                result = next((item for item in resource.get('Tags', [])
+                               if item["Key"] == tag_name), None)
                 if not result:
                     self.logger.debug(
                         "No %s tag found in resource." % tag_name)
@@ -189,7 +190,7 @@ class SlackDelivery(object):
                 int(response.headers['retry-after']))
             time.sleep(int(response.headers['Retry-After']))
             return
-        
+
         elif response.status_code != 200:  # pragma: no cover
             self.logger.info(
                 "Error in sending Slack message status:%s response: %s",
