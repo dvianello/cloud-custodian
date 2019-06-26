@@ -187,7 +187,7 @@ class SlackDelivery(object):
         if response.status_code == 429 and "Retry-After" in response.headers:
             self.logger.info(
                 "Slack API rate limiting. Waiting %d seconds",
-                int(response.headers['retry-after']))
+                int(response.headers['Retry-After']))
             time.sleep(int(response.headers['Retry-After']))
             return
 
