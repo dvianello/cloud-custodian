@@ -191,10 +191,10 @@ class SlackDelivery(object):
             time.sleep(int(response.headers['Retry-After']))
             return
 
-        elif response.status_code != 200:  # pragma: no cover
+        elif response.status_code != 200:
             self.logger.info(
                 "Error in sending Slack message status:%s response: %s",
-                response.status_code, response.text())
+                response.status_code, response.text)
             return
 
         elif not response_json['ok']:

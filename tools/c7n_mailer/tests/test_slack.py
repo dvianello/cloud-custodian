@@ -139,8 +139,29 @@ class TestSlackDelivery(unittest.TestCase):
         slack.send_slack_msg(self.target_channel, result[self.target_channel])
 
         args, kwargs = mock_post.call_args
-        assert self.target_channel == json.loads(kwargs['data'])['channel']
-        assert SLACK_POST_MESSAGE_API == kwargs['url']
-        assert kwargs['data'] == result[self.target_channel]
         self.logger.info.assert_called_with("Slack API rate limiting. Waiting %d seconds",
                                             retry_after_delay)
+
+    @patch('c7n_mailer.slack_delivery.requests.post')
+    def test_send_slack_msg_not_200_response(self, mock_post):
+        mock_post.return_value.status_code = 404
+        mock_post.return_value.text = "channel_not_found"
+
+        slack = SlackDelivery(self.config, self.logger, self.email_delivery)
+        result = slack.get_to_addrs_slack_messages_map(self.message)
+        slack.send_slack_msg(self.target_channel, result[self.target_channel])
+
+        self.logger.info.assert_called_with('Error in sending Slack message status:%s response: %s',
+                                            404, 'channel_not_found')
+
+    @patch('c7n_mailer.slack_delivery.requests.post')
+    def test_send_slack_msg_not_ok_response(self, mock_post):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {'ok': False, 'error': "failed"}
+
+        slack = SlackDelivery(self.config, self.logger, self.email_delivery)
+        result = slack.get_to_addrs_slack_messages_map(self.message)
+        slack.send_slack_msg(self.target_channel, result[self.target_channel])
+
+        self.logger.info.assert_called_with('Error in sending Slack message. Status:%s, '
+                                            'response:%s', 200, 'failed')
