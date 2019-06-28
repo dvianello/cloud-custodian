@@ -378,7 +378,7 @@ class ValueFilter(Filter):
             'op': {'$ref': '#/definitions/filters_common/comparison_operators'}
         }
     }
-
+    schema_alias = True
     annotate = True
     required_keys = set(('value', 'key'))
 
@@ -573,7 +573,8 @@ class ValueFilter(Filter):
             return sentinel, value.strip().lower()
 
         elif self.vtype == 'expr':
-            return sentinel, self.get_resource_value(value, resource)
+            sentinel = self.get_resource_value(sentinel, resource)
+            return sentinel, value
 
         elif self.vtype == 'integer':
             try:
@@ -631,6 +632,9 @@ class ValueFilter(Filter):
 
 class AgeFilter(Filter):
     """Automatically filter resources older than a given date.
+
+    **Deprecated** use a value filter with `value_type: age` which can be
+    done on any attribute.
     """
     threshold_date = None
 
@@ -675,9 +679,10 @@ class AgeFilter(Filter):
 
 
 class EventFilter(ValueFilter):
-    """Filter against a cloudwatch event associated to a resource type."""
+    """Filter a resource based on an event."""
 
     schema = type_schema('event', rinherit=ValueFilter.schema)
+    schema_alias = True
 
     def validate(self):
         if 'mode' not in self.manager.data:
@@ -760,3 +765,17 @@ class ValueRegex(object):
         if capture is None:  # regex didn't capture anything
             return None
         return capture.group(1)
+
+
+class StateTransitionFilter(Filter):
+    valid_origin_states = ()
+
+    def filter_resource_state(self, resources, event=None):
+        state_key = self.manager.get_model().state_key
+        states = self.valid_origin_states
+        orig_length = len(resources)
+        results = [r for r in resources if r[state_key] in states]
+        self.log.info("filtered %d of %d %s resources with  %s states" % (
+            len(results), orig_length, self.__class__.__name__, states))
+
+        return results
