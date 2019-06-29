@@ -21,7 +21,7 @@ import six
 from c7n_mailer.email_delivery import EmailDelivery
 from common import logger, get_ldap_lookup
 from common import MAILER_CONFIG, RESOURCE_1, SQS_MESSAGE_1, SQS_MESSAGE_4
-from mock import patch, call
+from mock import patch, call, MagicMock
 
 from c7n_mailer.utils_email import is_email
 
@@ -44,7 +44,6 @@ CLOUDTRAIL_EVENT = {
 class MockEmailDelivery(EmailDelivery):
     def get_ldap_connection(self):
         return get_ldap_lookup(cache_engine='redis')
-
 
 class EmailTest(unittest.TestCase):
 
@@ -292,7 +291,57 @@ class EmailTest(unittest.TestCase):
 
         self.assertEqual(ldap_emails, ['milton@initech.com'])
 
+
+    def test_get_resource_owner_emails_from_resource_org_domain_not_invoked(self):
+        config = copy.deepcopy(MAILER_CONFIG)
+        logger_mock = MagicMock()
+
+        # Enable org_domain
+        config['org_domain'] = "test.com"
+
+        # Add "CreatorName" to contact tags to avoid creating a new
+        # resource.
+        config['contact_tags'].append('CreatorName')
+
+        self.email_delivery = MockEmailDelivery(config, self.aws_session, logger_mock)
+        org_emails = self.email_delivery.get_resource_owner_emails_from_resource(
+            SQS_MESSAGE_1,
+            RESOURCE_1
+        )
+
+        assert org_emails == ['milton@initech.com', 'peter@initech.com']
+        assert call("Using org_domain to reconstruct email addresses from contact_tags values") not in \
+            logger_mock.debug.call_args_list
+
+    def test_get_resource_owner_emails_from_resource_org_domain(self):
+        config = copy.deepcopy(MAILER_CONFIG)
+        logger_mock = MagicMock()
+
+        # Enable org_domain and disable ldap lookups
+        # If ldap lookups are enabled, org_domain logic is not invoked.
+        config['org_domain'] = "test.com"
+        del config['ldap_uri']
+
+        # Add "CreatorName" to contact tags to avoid creating a new
+        # resource.
+        config['contact_tags'].append('CreatorName')
+
+
+        self.email_delivery = MockEmailDelivery(config, self.aws_session, logger_mock)
+        org_emails = self.email_delivery.get_resource_owner_emails_from_resource(
+            SQS_MESSAGE_1,
+            RESOURCE_1
+        )
+
+        assert org_emails == ['milton@initech.com', 'peter@test.com']
+        logger_mock.debug.assert_called_with(
+            "Using org_domain to reconstruct email addresses from contact_tags values")
+
+
+
     def test_cc_email_functionality(self):
         email = self.email_delivery.get_mimetext_message(
             SQS_MESSAGE_4, SQS_MESSAGE_4['resources'], ['hello@example.com'])
         self.assertEqual(email['Cc'], 'hello@example.com, cc@example.com')
+
+
