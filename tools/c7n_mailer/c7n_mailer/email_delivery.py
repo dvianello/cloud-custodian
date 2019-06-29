@@ -167,7 +167,8 @@ class EmailDelivery(object):
                                                     (uid) for uid in non_email_ids]))
 
         elif self.config.get('org_domain', False):
-            self.logger.debug("Using org_domain to reconstruct email addresses from contact_tags values")
+            self.logger.debug(
+                "Using org_domain to reconstruct email addresses from contact_tags values")
             org_domain = self.config.get('org_domain')
             org_emails = [uid + '@' + org_domain for uid in non_email_ids]
 

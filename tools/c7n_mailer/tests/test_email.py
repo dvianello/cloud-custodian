@@ -45,6 +45,7 @@ class MockEmailDelivery(EmailDelivery):
     def get_ldap_connection(self):
         return get_ldap_lookup(cache_engine='redis')
 
+
 class EmailTest(unittest.TestCase):
 
     def setUp(self):
@@ -291,7 +292,6 @@ class EmailTest(unittest.TestCase):
 
         self.assertEqual(ldap_emails, ['milton@initech.com'])
 
-
     def test_get_resource_owner_emails_from_resource_org_domain_not_invoked(self):
         config = copy.deepcopy(MAILER_CONFIG)
         logger_mock = MagicMock()
@@ -310,8 +310,8 @@ class EmailTest(unittest.TestCase):
         )
 
         assert org_emails == ['milton@initech.com', 'peter@initech.com']
-        assert call("Using org_domain to reconstruct email addresses from contact_tags values") not in \
-            logger_mock.debug.call_args_list
+        assert call("Using org_domain to reconstruct email addresses from contact_tags values") \
+            not in logger_mock.debug.call_args_list
 
     def test_get_resource_owner_emails_from_resource_org_domain(self):
         config = copy.deepcopy(MAILER_CONFIG)
@@ -326,7 +326,6 @@ class EmailTest(unittest.TestCase):
         # resource.
         config['contact_tags'].append('CreatorName')
 
-
         self.email_delivery = MockEmailDelivery(config, self.aws_session, logger_mock)
         org_emails = self.email_delivery.get_resource_owner_emails_from_resource(
             SQS_MESSAGE_1,
@@ -337,11 +336,7 @@ class EmailTest(unittest.TestCase):
         logger_mock.debug.assert_called_with(
             "Using org_domain to reconstruct email addresses from contact_tags values")
 
-
-
     def test_cc_email_functionality(self):
         email = self.email_delivery.get_mimetext_message(
             SQS_MESSAGE_4, SQS_MESSAGE_4['resources'], ['hello@example.com'])
         self.assertEqual(email['Cc'], 'hello@example.com, cc@example.com')
-
-
