@@ -124,7 +124,10 @@ class SlackDelivery(object):
     def retrieve_user_im(self, email_addresses):
         list = {}
 
-        if not self.config['slack_token']:
+        if not self.config.get('slack_token', False):
+            # TODO: if slack_token is _not_ defined and caching is disabled
+            # we should simply throw an error & stop here, as there's no way
+            # we're gonna get any reply from the Slack API. To be discussed.
             self.logger.info("No Slack token found.")
 
         for address in email_addresses:
@@ -137,28 +140,32 @@ class SlackDelivery(object):
                 url='https://slack.com/api/users.lookupByEmail',
                 data={'email': address},
                 headers={'Content-Type': 'application/x-www-form-urlencoded',
-                         'Authorization': 'Bearer %s' % self.config.get('slack_token')}).json()
+                         'Authorization': 'Bearer %s' % self.config.get('slack_token')})
 
-            if not response["ok"]:
-                if "headers" in response.keys() and "Retry-After" in response["headers"]:
-                    self.logger.info(
-                        "Slack API rate limiting. Waiting %d seconds",
-                        int(response.headers['retry-after']))
-                    time.sleep(int(response.headers['Retry-After']))
-                    continue
-                elif response["error"] == "invalid_auth":
-                    raise Exception("Invalid Slack token.")
-                elif response["error"] == "users_not_found":
+            if response.status_code == 429 and "Retry-After" in response.headers:
+                self.logger.info(
+                    "Slack API rate limiting. Waiting %d seconds",
+                    int(response.headers['Retry-After']))
+
+                time.sleep(int(response.headers['Retry-After']))
+                continue
+
+            response_json = response.json()
+            if not response_json["ok"]:
+                if response_json["error"] == "users_not_found":
                     self.logger.info("Slack user ID for email address %s not found.", address)
                     if self.caching:
                         self.caching.set(address, {})
                     continue
+
                 else:
-                    self.logger.warning("Slack Response: {}".format(response))
+                    self.logger.warning("Error in sending Slack message. Status:%s, response:%s",
+                                        response.status_code, response_json['error'])
+
             else:
-                slack_user_id = response['user']['id']
-                if 'enterprise_user' in response['user'].keys():
-                    slack_user_id = response['user']['enterprise_user']['id']
+                slack_user_id = response_json['user']['id']
+                if 'enterprise_user' in response_json['user'].keys():
+                    slack_user_id = response_json['user']['enterprise_user']['id']
                 self.logger.debug(
                     "Slack account %s found for user %s", slack_user_id, address)
                 if self.caching:

@@ -12,6 +12,9 @@ from c7n_mailer.email_delivery import EmailDelivery
 SLACK_TOKEN = "slack-token"
 SLACK_POST_MESSAGE_API = "https://slack.com/api/chat.postMessage"
 
+with open("test-files/slack_lookup_by_email_response.json") as json_file:
+    SLACK_LOOKUP_BY_EMAIL_RESPONSE = json.load(json_file)
+
 
 class TestSlackDelivery(unittest.TestCase):
     def setUp(self):
@@ -32,6 +35,7 @@ class TestSlackDelivery(unittest.TestCase):
         self.resource = copy.deepcopy(RESOURCE_3)
         self.message['resources'] = [self.resource]
         self.target_channel = 'test-channel'
+        self.user_im_email_address = 'spengler@ghostbusters.example.com'
 
     def test_map_sending_to_channel(self):
         slack = SlackDelivery(self.config, self.logger, self.email_delivery)
@@ -138,7 +142,6 @@ class TestSlackDelivery(unittest.TestCase):
         result = slack.get_to_addrs_slack_messages_map(self.message)
         slack.send_slack_msg(self.target_channel, result[self.target_channel])
 
-        args, kwargs = mock_post.call_args
         self.logger.info.assert_called_with("Slack API rate limiting. Waiting %d seconds",
                                             retry_after_delay)
 
@@ -165,3 +168,72 @@ class TestSlackDelivery(unittest.TestCase):
 
         self.logger.info.assert_called_with('Error in sending Slack message. Status:%s, '
                                             'response:%s', 200, 'failed')
+
+    @patch('c7n_mailer.slack_delivery.requests.post')
+    def test_retrieve_user_im_no_slack_token(self, mock_post):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = SLACK_LOOKUP_BY_EMAIL_RESPONSE
+        email_address = "spengler@ghostbusters.example.com"
+
+        config = copy.deepcopy(self.config)
+        del config['slack_token']
+
+        slack = SlackDelivery(config, self.logger, self.email_delivery)
+        slack.retrieve_user_im([email_address])
+
+        self.logger.info.assert_called_with("No Slack token found.")
+
+    @patch('c7n_mailer.slack_delivery.requests.post')
+    def test_retrieve_user_im(self, mock_post):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = SLACK_LOOKUP_BY_EMAIL_RESPONSE
+
+        slack = SlackDelivery(self.config, self.logger, self.email_delivery)
+        result = slack.retrieve_user_im([self.user_im_email_address])
+
+        assert self.user_im_email_address in result
+        assert result[self.user_im_email_address] == SLACK_LOOKUP_BY_EMAIL_RESPONSE['user']['id']
+        self.logger.debug.assert_called_with("Slack account %s found for user %s",
+                                             SLACK_LOOKUP_BY_EMAIL_RESPONSE['user']['id'],
+                                             self.user_im_email_address)
+
+    @patch('c7n_mailer.slack_delivery.requests.post')
+    def test_retrieve_user_im_enterprise_user(self, mock_post):
+        enterprise_user_id = 'ENTUSERID'
+        json_response = copy.deepcopy(SLACK_LOOKUP_BY_EMAIL_RESPONSE)
+        json_response['user']['enterprise_user'] = {'id': enterprise_user_id}
+
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = json_response
+
+        slack = SlackDelivery(self.config, self.logger, self.email_delivery)
+        result = slack.retrieve_user_im([self.user_im_email_address])
+
+        assert self.user_im_email_address in result
+        assert result[self.user_im_email_address] == enterprise_user_id
+        self.logger.debug.assert_called_with("Slack account %s found for user %s",
+                                             enterprise_user_id,
+                                             self.user_im_email_address)
+
+    @patch('c7n_mailer.slack_delivery.requests.post')
+    def test_retrieve_user_im_retry_after(self, mock_post):
+        retry_after_delay = 1
+        mock_post.return_value.status_code = 429
+        mock_post.return_value.headers = {'Retry-After': retry_after_delay}
+
+        slack = SlackDelivery(self.config, self.logger, self.email_delivery)
+        slack.retrieve_user_im([self.user_im_email_address])
+
+        self.logger.info.assert_called_with("Slack API rate limiting. Waiting %d seconds",
+                                            retry_after_delay)
+
+    @patch('c7n_mailer.slack_delivery.requests.post')
+    def test_retrieve_user_im_user_not_found(self, mock_post):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {'ok': False, 'error': 'users_not_found'}
+
+        slack = SlackDelivery(self.config, self.logger, self.email_delivery)
+        result = slack.retrieve_user_im([self.user_im_email_address])
+
+        assert result == {}
+        self.logger.info.assert_called_with("Slack user ID for email address %s not found.", self.user_im_email_address)
