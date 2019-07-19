@@ -17,12 +17,16 @@ from concurrent.futures import as_completed
 from datetime import timedelta
 
 import six
+from azure.mgmt.costmanagement.models import QueryDefinition, QueryDataset, \
+    QueryAggregation, QueryGrouping, QueryTimePeriod, TimeframeType
 from azure.mgmt.policyinsights import PolicyInsightsClient
+
 from c7n_azure.tags import TagHelper
-from c7n_azure.utils import IpRangeHelper
+from c7n_azure.utils import IpRangeHelper, ResourceIdParser, StringUtils
 from c7n_azure.utils import Math
 from c7n_azure.utils import ThreadHelper
 from c7n_azure.utils import now
+from c7n_azure.utils import utcnow
 from dateutil import tz as tzutils
 from dateutil.parser import parse
 
@@ -53,20 +57,58 @@ class MetricFilter(Filter):
 
     Filters Azure resources based on live metrics from the Azure monitor
 
-    :example: Find all VMs with an average Percentage CPU greater than 75% over last 2 hours
+    :example:
+
+    Find all VMs with an average Percentage CPU greater than 75% over last 2 hours
 
     .. code-block:: yaml
 
-            policies:
-              - name: vm-percentage-cpu
-                resource: azure.vm
-                filters:
-                  - type: metric
-                    metric: Percentage CPU
-                    aggregation: average
-                    op: gt
-                    threshold: 75
-                    timeframe: 2
+        policies:
+          - name: vm-percentage-cpu
+            resource: azure.vm
+            filters:
+              - type: metric
+                metric: Percentage CPU
+                aggregation: average
+                op: gt
+                threshold: 75
+                timeframe: 2
+
+    :example:
+
+    Find KeyVaults with more than 1000 API hits in the last hour
+
+    .. code-block:: yaml
+
+        policies:
+          - name: keyvault-hits
+            resource: azure.keyvault
+            filters:
+              - type: metric
+                metric: ServiceApiHit
+                aggregation: total
+                op: gt
+                threshold: 1000
+                timeframe: 1
+
+    :example:
+
+    Find SQL servers with less than 10% average DTU consumption
+    across all databases over last 24 hours
+
+    .. code-block:: yaml
+
+        policies:
+          - name: dtu-consumption
+            resource: azure.sqlserver
+            filters:
+              - type: metric
+                metric: dtu_consumption_percent
+                aggregation: average
+                op: lt
+                threshold: 10
+                timeframe: 24
+                filter:  "DatabaseResourceId eq '*'"
 
     """
 
@@ -187,6 +229,8 @@ class TagActionFilter(Filter):
     Optionally, the 'tz' parameter can get used to specify the timezone
     in which to interpret the clock (default value is 'utc')
 
+    :example:
+
     .. code-block :: yaml
 
        policies:
@@ -200,8 +244,7 @@ class TagActionFilter(Filter):
               op: stop
               # Another optional tag is skew
               tz: utc
-          actions:
-            - type: stop
+
 
     """
     schema = type_schema(
@@ -269,6 +312,49 @@ class TagActionFilter(Filter):
 
 
 class DiagnosticSettingsFilter(ValueFilter):
+    """The diagnostic settings filter is implicitly just the ValueFilter
+    on the diagnostic settings for an azure resource.
+
+    :example:
+
+    Find Load Balancers that have logs for both LoadBalancerProbeHealthStatus category and
+    LoadBalancerAlertEvent category enabled.
+    The use of value_type: swap is important for these examples because it swaps the value
+    and the evaluated key so that it evaluates the value provided is in the logs.
+
+    .. code-block:: yaml
+
+        policies
+          - name: find-load-balancers-with-logs-enabled
+            resource: azure.loadbalancer
+            filters:
+              - type: diagnostic-settings
+                key: logs[?category == 'LoadBalancerProbeHealthStatus'][].enabled
+                value: True
+                op: in
+                value_type: swap
+              - type: diagnostic-settings
+                key: logs[?category == 'LoadBalancerAlertEvent'][].enabled
+                value: True
+                op: in
+                value_type: swap
+
+    :example:
+
+    Find KeyVaults that have logs enabled for the AuditEvent category.
+
+    .. code-block:: yaml
+
+        policies
+          - name: find-keyvaults-with-logs-enabled
+            resource: azure.keyvault
+            filters:
+              - type: diagnostic-settings
+                key: logs[?category == 'AuditEvent'][].enabled
+                value: True
+                op: in
+                value_type: swap
+    """
 
     schema = type_schema('diagnostic-settings', rinherit=ValueFilter.schema)
     schema_alias = True
@@ -478,3 +564,230 @@ class FirewallRulesFilter(Filter):
             return self.policy_include.issubset(resource_rules)
         else:  # validated earlier, can never happen
             raise FilterValidationError("Internal error.")
+
+
+class ResourceLockFilter(Filter):
+    """
+    Filter locked resources.
+    Lock can be of 2 types: ReadOnly and CanNotDelete. To filter any lock, use "Any" type.
+    Lock type is optional, by default any lock will be applied to the filter.
+    To get unlocked resources, use "Absent" type.
+
+    :example:
+
+    Get all keyvaults with ReadOnly lock:
+
+    .. code-block :: yaml
+
+       policies:
+        - name: locked-keyvaults
+          resource: azure.keyvault
+          filters:
+            - type: resource-lock
+              lock-type: ReadOnly
+
+    :example:
+
+    Get all locked sqldatabases (any type of lock):
+
+    .. code-block :: yaml
+
+       policies:
+        - name: locked-sqldatabases
+          resource: azure.sqldatabase
+          filters:
+            - type: resource-lock
+
+    :example:
+
+    Get all unlocked resource groups:
+
+    .. code-block :: yaml
+
+       policies:
+        - name: unlock-rgs
+          resource: azure.resourcegroup
+          filters:
+            - type: resource-lock
+              lock-type: Absent
+
+    """
+
+    schema = type_schema(
+        'resource-lock', required=['type'],
+        **{
+            'lock-type': {'enum': ['ReadOnly', 'CanNotDelete', 'Any', 'Absent']},
+        })
+
+    schema_alias = True
+
+    def __init__(self, data, manager=None):
+        super(ResourceLockFilter, self).__init__(data, manager)
+        self.lock_type = self.data.get('lock-type', 'Any')
+
+    def process(self, resources, event=None):
+        resources, exceptions = ThreadHelper.execute_in_parallel(
+            resources=resources,
+            event=event,
+            execution_method=self._process_resource_set,
+            executor_factory=self.executor_factory,
+            log=self.log
+        )
+        if exceptions:
+            raise exceptions[0]
+        return resources
+
+    def _process_resource_set(self, resources, event=None):
+        client = self.manager.get_client('azure.mgmt.resource.locks.ManagementLockClient')
+        result = []
+        for resource in resources:
+            if resource.get('resourceGroup') is None:
+                locks = [r.serialize(True) for r in
+                         client.management_locks.list_at_resource_group_level(
+                    resource['name'])]
+            else:
+                locks = [r.serialize(True) for r in client.management_locks.list_at_resource_level(
+                    resource['resourceGroup'],
+                    ResourceIdParser.get_namespace(resource['id']),
+                    ResourceIdParser.get_resource_name(resource.get('c7n:parent-id')) or '',
+                    ResourceIdParser.get_resource_type(resource['id']),
+                    resource['name'])]
+
+            if StringUtils.equal('Absent', self.lock_type) and not locks:
+                result.append(resource)
+            else:
+                for lock in locks:
+                    if StringUtils.equal('Any', self.lock_type) or \
+                            StringUtils.equal(lock['properties']['level'], self.lock_type):
+                        result.append(resource)
+                        break
+
+        return result
+
+
+class CostFilter(ValueFilter):
+    """
+    Filter resources by the cost consumed over a timeframe.
+    Timeframe can be either number of days before today or one of:
+
+    WeekToDate,
+    MonthToDate,
+    YearToDate,
+    TheLastWeek,
+    TheLastMonth,
+    TheLastYear
+
+
+    :examples:
+
+    SQL servers that were cost more than 2000 in the last month.
+
+    .. code-block:: yaml
+
+            policies:
+                - name: expensive-sql-servers-last-month
+                  resource: azure.sqlserver
+                  filters:
+                  - type: cost
+                    timeframe: TheLastMonth
+                    op: gt
+                    value: 2000
+
+    SQL servers that were cost more than 2000 in the last 30 days not including today.
+
+    .. code-block:: yaml
+
+            policies:
+                - name: expensive-sql-servers
+                  resource: azure.sqlserver
+                  filters:
+                  - type: cost
+                    timeframe: 30
+                    op: gt
+                    value: 2000
+    """
+
+    preset_timeframes = [i.value for i in TimeframeType if i.value != 'Custom']
+
+    schema = type_schema('cost',
+        rinherit=ValueFilter.schema,
+        required=['timeframe'],
+        key=None,
+        **{
+            'timeframe': {
+                'oneOf': [
+                    {'enum': preset_timeframes},
+                    {"type": "number", "minimum": 1}
+                ]
+            }
+        })
+
+    schema_alias = True
+
+    def __init__(self, data, manager=None):
+        data['key'] = 'PreTaxCost'  # can also be Currency, but now only PreTaxCost is supported
+        super(CostFilter, self).__init__(data, manager)
+        self.cached_costs = None
+
+    def __call__(self, i):
+        if self.cached_costs is None:
+            self.cached_costs = self._query_costs()
+        id = i['id'].lower()
+        if id not in self.cached_costs:
+            return False
+
+        cost = self.cached_costs[id]
+        i['c7n:cost'] = cost
+        result = super(CostFilter, self).__call__(cost)
+        return result
+
+    def fix_wrap_rest_response(self, data):
+        '''
+        Azure REST API doesn't match the documentation and the python SDK fails to deserialize
+        the response.
+        This is a temporal workaround that converts the response into the correct form.
+        :param data: partially deserialized response that doesn't match the the spec.
+        :return: partially deserialized response that does match the the spec.
+        '''
+        type = data.get('type', None)
+        if type != 'Microsoft.CostManagement/query':
+            return data
+        data['value'] = [data]
+        data['nextLink'] = data['properties']['nextLink']
+        return data
+
+    def _query_costs(self):
+        client = self.manager.get_client('azure.mgmt.costmanagement.CostManagementClient')
+
+        aggregation = {'totalCost': QueryAggregation(name='PreTaxCost')}
+
+        grouping = [QueryGrouping(type='Dimension', name='ResourceId')]
+
+        dataset = QueryDataset(grouping=grouping, aggregation=aggregation)
+
+        timeframe = self.data['timeframe']
+        time_period = None
+
+        if timeframe not in CostFilter.preset_timeframes:
+            end_time = utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            start_time = end_time - timedelta(days=timeframe)
+            timeframe = 'Custom'
+            time_period = QueryTimePeriod(from_property=start_time, to=end_time)
+
+        definition = QueryDefinition(timeframe=timeframe, time_period=time_period, dataset=dataset)
+
+        subscription_id = self.manager.get_session().subscription_id
+
+        scope = '/subscriptions/' + subscription_id
+
+        query = client.query.usage_by_scope(scope, definition)
+
+        if hasattr(query, '_derserializer'):
+            original = query._derserializer._deserialize
+            query._derserializer._deserialize = lambda target, data: \
+                original(target, self.fix_wrap_rest_response(data))
+
+        result = list(query)[0]
+        result = [{result.columns[i].name: v for i, v in enumerate(row)} for row in result.rows]
+        result = {r['ResourceId'].lower(): r for r in result}
+        return result
